@@ -27,7 +27,7 @@ function isLoggedIn(req, res, next) {
 router.get('/patient-index', async (req, res) => {
   try {
     const highPriorityBlogs = await Blog.find({ priority: 'high', verificationStatus: 'Verified' }).limit(5).exec();
-      const patientEmail = req.session.user.email; 
+      const patientEmail = req.session?.user?.email; 
       const patient = await Patient.findOne({email: patientEmail}).lean(); 
 
       res.render('patient-index', { blogs: highPriorityBlogs, patient });
@@ -124,7 +124,7 @@ router.get('/doctors', async (req, res) => {
     const doctors = await Doctor.find({ verified: 'Verified' })
       .populate({
         path: 'hospitals',
-        select: 'name city -_id' 
+        select: 'name city -_id'
       })
       .sort(sortCriteria);
 
@@ -134,41 +134,50 @@ router.get('/doctors', async (req, res) => {
     const specialities = await Doctor.distinct('speciality');
     const languages = await Doctor.distinct('languages');
     const genders = await Doctor.distinct('gender');
+    const hospital = await Doctor.distinct('hospital');
 
-    res.render('patientDoctors', {
+    // res.render('patientDoctors', {
+    //   doctors,
+    //   countries,
+    //   states,
+    //   cities,
+    //   specialities,
+    //   languages,
+    //   genders
+    // });
+    res.json({
       doctors,
       countries,
       states,
       cities,
       specialities,
       languages,
-      genders
+      genders,
+      hospital
     });
   } catch (err) {
     console.error(err.message);
-    res.status(500).send('Server Error');
+    res.status(500).json({ error: 'Server Error' });
   }
 });
-
-
 router.get('/doctors/:id/slots', isLoggedIn, async (req, res) => {
   try {
-      const doctorId = req.params.id;
-      const doctor = await Doctor.findById(doctorId)
-          .populate({
-              path: 'reviews.patientId',
-              select: 'name'
-          });
-      if (!doctor) {
-          return res.status(404).send('Doctor not found');
-      }
+    const doctorId = req.params.id;
+    const doctor = await Doctor.findById(doctorId)
+      .populate({
+        path: 'reviews.patientId',
+        select: 'name'
+      });
+    if (!doctor) {
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
 
-      const blogs = await Blog.find({ authorId: doctorId, verificationStatus: 'Verified' });
+    const blogs = await Blog.find({ authorId: doctorId, verificationStatus: 'Verified' });
 
-      res.render('doctorProfileView', { doctor, blogs });
+    res.json({ doctor, blogs });
   } catch (error) {
-      console.error(error.message);
-      res.status(500).send('Server Error');
+    console.error(error.message);
+    res.status(500).json({ error: 'Server Error' });
   }
 });
 
@@ -211,6 +220,8 @@ router.post('/book', isLoggedIn, async (req, res) => {
       await doctor.save();
 
       res.redirect('/patient/bookings');
+      res.status(200).json({ message: 'Booking successful' });
+
   } catch (error) {
       console.error(error.message);
       res.status(500).send('Server Error');
@@ -480,28 +491,29 @@ function escapeRegex(text) {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
 }
 
+
 router.get('/dashboard', isLoggedIn, async (req, res) => {
   try {
-      const patient = await Patient.findOne({ email: req.session.user.email }).lean();
-      if (!patient) {
-          return res.status(404).send('Patient not found');
-      }
+    const patient = await Patient.findOne({ email: req.user.email }).lean();
+    if (!patient) {
+      return res.status(404).send('Patient not found');
+    }
 
-      const chats = await Chat.find({ patientId: patient._id })
-          .populate('doctorId', 'name')
-          .sort({ updatedAt: -1 })
-          .lean();
+    const chats = await Chat.find({ patientId: patient._id })
+      .populate('doctorId', 'name')
+      .sort({ updatedAt: -1 })
+      .lean();
 
-      chats.forEach(chat => {
-          chat.unreadCount = chat.messages.filter(message => 
-              !message.read && message.senderId.toString() !== patient._id.toString()
-          ).length;
-      });
+    chats.forEach(chat => {
+      chat.unreadCount = chat.messages.filter(message => 
+        !message.read && message.senderId.toString() !== patient._id.toString()
+      ).length;
+    });
 
-      res.render('patientDashboard', { patient, chats });
+    return res.json({ patient, chats });
   } catch (err) {
-      console.error(err.message);
-      res.status(500).send('Server Error');
+    console.error(err.message);
+    return res.status(500).json({ error: 'Server Error' });
   }
 });
 
@@ -515,27 +527,20 @@ router.get('/chat/:id', isLoggedIn, async (req, res) => {
       return res.status(404).send('Chat not found');
     }
 
-    const updatedChat = await Chat.findById(chatId);
+    chat.messages.forEach(message => {
+      if (message.senderId.toString() !== req.user._id.toString() && !message.read) {
+        message.read = true;
+      }
+    });
 
-    if (updatedChat) {
-      updatedChat.messages.forEach(message => {
-        if (message.senderId.toString() !== req.user._id.toString() && !message.read) {
-          message.read = true;
-        }
-      });
+    await Chat.updateOne({ _id: chatId }, { $set: { messages: chat.messages } });
 
-      await updatedChat.save();
-    }
-
-    res.render('patientChat', { chat: updatedChat.toObject() });
-
+    res.json({ chat });
   } catch (err) {
     console.error(err.message);
-    res.status(500).send('Server Error');
+    return res.status(500).json({ error: 'Server Error' });
   }
 });
-
-
 
 router.post('/chats/:chatId/send-message', isLoggedIn, async (req, res) => {
   try {
@@ -550,14 +555,12 @@ router.post('/chats/:chatId/send-message', isLoggedIn, async (req, res) => {
     let chat = await Chat.findOneAndUpdate(
       { _id: chatId, patientId: patient._id },
       { $push: { messages: { senderId: patient._id, text: message, timestamp: new Date(), read: false } } },
-      { upsert: true, new: true }
-    );
+      { new: true }
+    ).populate('doctorId');
 
-    const doctor = await Doctor.findById(chat.doctorId);
-
-    if (doctor) {
+    if (chat.doctorId) {
       await Notification.create({
-        userId: doctor._id,
+        userId: chat.doctorId._id,
         message: `New message from ${patient.name}`,
         type: 'chat',
         read: false,
@@ -565,14 +568,12 @@ router.post('/chats/:chatId/send-message', isLoggedIn, async (req, res) => {
       });
     }
 
-    res.redirect(`/patient/chat/${chat._id}`);
-
+    res.json({ chat });
   } catch (error) {
     console.error(error.message);
-    res.status(500).send('Server Error');
+    return res.status(500).json({ error: 'Server Error' });
   }
 });
-
 router.get('/prescriptions', isLoggedIn, async (req, res) => {
   try {
     const patientId = req.session.user._id;
@@ -760,33 +761,118 @@ router.get('/prescriptions/:id/download', isLoggedIn, async (req, res) => {
 
 router.get('/notifications', isLoggedIn, async (req, res) => {
   try {
-      const notifications = await Notification.find({ userId: req.user._id }).lean();
-      res.render('patientNotifications', { notifications });
+    const notifications = await Notification.find({ userId: req.user._id }).lean();
+
+    const chatNotifications = notifications.filter(notification => notification.type === 'chat');
+    const otherNotifications = notifications.filter(notification => notification.type !== 'chat');
+
+    const chatDetailsPromises = chatNotifications.map(async (notification) => {
+      try {
+        if (!notification.chatId) {
+          console.warn(`No chatId for notification ${notification._id}`);
+          return {
+            ...notification,
+            senderName: 'Unknown',
+            senderProfilePic: null,
+            message: 'No message available',
+            timeAgo: timeSince(notification.createdAt)
+          };
+        }
+
+        const chat = await Chat.findById(notification.chatId)
+          .populate('doctorId patientId')
+          .lean();
+
+        if (!chat) {
+          console.warn(`Chat not found for notification ${notification._id}`);
+          return {
+            ...notification,
+            senderName: 'Unknown',
+            senderProfilePic: null,
+            message: 'No message available',
+            timeAgo: timeSince(notification.createdAt)
+          };
+        }
+
+        const sender = chat.doctorId._id.toString() === req.user._id.toString() ? chat.patientId : chat.doctorId;
+
+        return {
+          ...notification,
+          senderName: sender.name || 'Unknown',
+          senderProfilePic: sender.profilePicture ? `data:${sender.profilePicture.contentType};base64,${sender.profilePicture.data.toString('base64')}` : null,
+          message: notification.message,
+          timeAgo: timeSince(notification.createdAt)
+        };
+      } catch (err) {
+        console.error(`Error fetching chat details for notification ${notification._id}:`, err);
+        return {
+          ...notification,
+          senderName: 'Error',
+          senderProfilePic: null,
+          message: 'Error fetching message',
+          timeAgo: timeSince(notification.createdAt)
+        };
+      }
+    });
+
+    const chatNotificationsWithDetails = await Promise.all(chatDetailsPromises);
+
+    const allNotifications = [...chatNotificationsWithDetails, ...otherNotifications].map(notification => ({
+      ...notification,
+      timeAgo: timeSince(notification.createdAt)
+    }));
+
+    res.json({ notifications: allNotifications });
   } catch (error) {
-      console.error(error);
-      res.status(500).send('Server Error');
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ message: 'Server Error' });
   }
-  });
-  
-router.post('/notifications/:id/mark-read', isLoggedIn, async (req, res) => {
-    try {
-        await Notification.findByIdAndUpdate(req.params.id, { read: true });
-        res.redirect('/patient/notifications');
-    } catch (error) {
-        console.error(error);
-        res.status(500).send('Server Error');
-    }
 });
-  
-  
+
+function timeSince(date) {
+  const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+  let interval = Math.floor(seconds / 31536000);
+
+  if (interval > 1) {
+    return interval + " years ago";
+  }
+  interval = Math.floor(seconds / 2592000);
+  if (interval > 1) {
+    return interval + " months ago";
+  }
+  interval = Math.floor(seconds / 86400);
+  if (interval > 1) {
+    return interval + " days ago";
+  }
+  interval = Math.floor(seconds / 3600);
+  if (interval > 1) {
+    return interval + " hours ago";
+  }
+  interval = Math.floor(seconds / 60);
+  if (interval > 1) {
+    return interval + " minutes ago";
+  }
+  return Math.floor(seconds) + " seconds ago";
+}
+
+router.post('/notifications/:id/mark-read', isLoggedIn, async (req, res) => {
+  try {
+    await Notification.findByIdAndUpdate(req.params.id, { read: true });
+    res.json({ message: 'Notification marked as read' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server Error' });
+  }
+});
+
 router.post('/notifications/:id/delete', isLoggedIn, async (req, res) => {
-    try {
-        await Notification.findByIdAndDelete(req.params.id);
-        res.redirect('/patient/notifications');
-    } catch (error) {
-        console.error(error);
-        res.status(500).send('Server Error');
-    }
+  try {
+    await Notification.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Notification deleted' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Server Error' });
+  }
 });
 
 module.exports = router;
